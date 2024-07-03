@@ -7,7 +7,7 @@ import random
 import sys
 import re
 from typing import Dict, List, Any, Callable, Tuple
-
+import ast
 import black
 
 
@@ -40,7 +40,7 @@ class FileHandler:
         """
 
         try:
-            with open(file_path, 'r') as file:
+            with open(file_path, encoding='utf-8') as file:
                 data = json.load(file)
             return data
 
@@ -181,6 +181,8 @@ class CodeGenerator:
         """
         self.node_class_mappings = node_class_mappings
         self.base_node_class_mappings = base_node_class_mappings
+        self.prompts = {}
+        self.file_paths = {}
 
     def generate_workflow(self, load_order: List, filename: str = 'generated_code_workflow.py', queue_size: int = 10) -> str:
         """Generate the execution code based on the load order.
@@ -206,9 +208,12 @@ class CodeGenerator:
             # Generate class definition and inputs from the data
             inputs, class_type = data['inputs'], data['class_type']
             class_def = self.node_class_mappings[class_type]()
+            # print(inputs)
 
             # If the class hasn't been initialized yet, initialize it and generate the import statements
             if class_type not in initialized_objects:
+                # print("not in initialized_objects")
+                # print(class_type)
                 # No need to use preview image nodes since we are executing the script in a terminal
                 if class_type == 'PreviewImage':
                     continue
@@ -226,9 +231,14 @@ class CodeGenerator:
 
             # Remove any keyword arguments from **inputs if they are not in class_def_params
             inputs = {key: value for key, value in inputs.items() if key in class_def_params}
+            # print(inputs)
+
             # Deal with hidden variables
             if 'unique_id' in class_def_params:
                 inputs['unique_id'] = random.randint(1, 2**64)
+
+            # Extract prompts and file paths from inputs
+            inputs = self.extract_prompts_and_file_paths(class_type, inputs)
 
             # Create executed variable and generate code
             executed_variables[idx] = f'{self.clean_variable_name(class_type)}_{idx}'
@@ -262,8 +272,7 @@ class CodeGenerator:
         # Generate the Python code
         code = f'{variable_name} = {obj_name}.{func}({args})\n'
 
-        # If the code contains dependencies and is not a loader or encoder, indent the code because it will be placed inside
-        # of a for loop
+        # If the code contains dependencies and is not a loader or encoder, indent the code because it will be placed inside of a for loop
         if not is_special_function:
             code = f'\t{code}'
 
@@ -288,6 +297,20 @@ class CodeGenerator:
             return f'{key}={value["variable_name"]}'
         return f'{key}={value}'
 
+    def extract_prompts_and_file_paths(self, class_type: str, inputs: Dict) -> Dict:
+        class_type_clean = class_type.replace(" ", "_").replace("//","")
+        for key, value in inputs.items():
+            if 'prompt' in key.lower() or 'text' in key.lower():
+                variable_name = f"{class_type_clean}_{key}"
+                self.prompts[variable_name] = value
+                inputs[key] = {'variable_name': f'{variable_name}'}
+            elif (class_type == 'LoadImage'or class_type == 'SaveImage') and key in ['image', 'filename', 'filename_prefix']:
+                variable_name = f"{class_type_clean}_{key}"
+                self.file_paths[variable_name] = value
+                inputs[key] = {'variable_name': f'{variable_name}'}
+        return inputs
+
+    
     def assemble_python_code(self, import_statements: set, speical_functions_code: List[str], code: List[str], queue_size: int, custom_nodes=False) -> str:
         """Generates the final code string.
 
@@ -316,11 +339,14 @@ class CodeGenerator:
             custom_nodes = ''
         # Create import statements for node classes
         imports_code = [f"from nodes import {', '.join([class_name for class_name in import_statements])}" ]
+        # prompt and file path variables
+        prompts_code = "\n".join([f"{key} = {json.dumps(value)}" for key, value in self.prompts.items()])
+        file_paths_code = "\n".join([f"{key} = {json.dumps(value)}" for key, value in self.file_paths.items()])
         # Assemble the main function code, including custom nodes if applicable
         main_function_code = "def main():\n\t" + f'{custom_nodes}with torch.inference_mode():\n\t\t' + '\n\t\t'.join(speical_functions_code) \
             + f'\n\n\t\tfor q in range({queue_size}):\n\t\t' + '\n\t\t'.join(code)
         # Concatenate all parts to form the final code
-        final_code = '\n'.join(static_imports + imports_code + ['', main_function_code, '', 'if __name__ == "__main__":', '\tmain()'])
+        final_code = '\n'.join(static_imports + imports_code + [prompts_code, file_paths_code, '', main_function_code, '', 'if __name__ == "__main__":', '\tmain()'])
         # Format the final code according to PEP 8 using the Black library
         final_code = black.format_str(final_code, mode=black.Mode())
 
@@ -368,7 +394,7 @@ class CodeGenerator:
         return clean_name
 
     def get_function_parameters(self, func: Callable) -> List:
-        """Get the names of a function's parameters.
+        """Get the names of a function's parameters. add functions to deal with kwargs
 
         Args:
             func (Callable): The function whose parameters we want to inspect.
@@ -376,10 +402,53 @@ class CodeGenerator:
         Returns:
             List: A list containing the names of the function's parameters.
         """
+        # Step 1: Get the function signature parameters
         signature = inspect.signature(func)
         parameters = {name: param.default if param.default != param.empty else None
                     for name, param in signature.parameters.items()}
-        return list(parameters.keys())  
+        
+        # Step 2: Check if **kwargs is in the parameters
+        has_kwargs = any(param.kind == param.VAR_KEYWORD for param in signature.parameters.values())
+        
+        # If **kwargs is not present, return the basic parameters
+        if not has_kwargs:
+            return list(parameters.keys())
+        
+        # Step 3: Get the source code of the function
+        try:
+            source_code = inspect.getsource(func)
+        except OSError:
+            return list(parameters.keys())  # If the source code cannot be retrieved, return basic parameters
+
+        # Step 4: Normalize the indentation of the source code
+        lines = source_code.splitlines()
+        if lines:
+            indent = len(lines[0]) - len(lines[0].lstrip())
+            normalized_source_code = "\n".join(line[indent:] for line in lines)
+        else:
+            normalized_source_code = source_code
+
+        # Step 5: Parse the normalized source code into an AST
+        tree = ast.parse(normalized_source_code)
+        
+        # Step 6: Find all kwargs keys used in the function body
+        class KwargVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.kwargs_keys = set()
+
+            def visit_Subscript(self, node):
+                if isinstance(node.value, ast.Name) and node.value.id == 'kwargs' and isinstance(node.slice, ast.Constant):
+                    self.kwargs_keys.add(node.slice.value)
+                self.generic_visit(node)
+        
+        kwarg_visitor = KwargVisitor()
+        kwarg_visitor.visit(tree)
+        
+        # Combine the parameters with the kwargs keys
+        kwargs_keys = list(kwarg_visitor.kwargs_keys)
+        all_params = list(parameters.keys()) + kwargs_keys
+        return all_params
+
 
     def update_inputs(self, inputs: Dict, executed_variables: Dict) -> Dict:
         """Update inputs based on the executed variables.
@@ -452,9 +521,9 @@ class ComfyUItoPython:
 
 if __name__ == '__main__':
     # Update class parameters here
-    input_file = 'workflow_api.json'
-    output_file = 'workflow_api.py'
-    queue_size = 10
+    input_file = 'swapface_api.json'
+    output_file = 'swapface_api.py'
+    queue_size = 1
 
     # Convert ComfyUI workflow to Python
     ComfyUItoPython(input_file=input_file, output_file=output_file, queue_size=queue_size)
