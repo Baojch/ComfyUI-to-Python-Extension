@@ -1,3 +1,7 @@
+## My modifies on ComfyUI-to-Python-Extension
+- solve the problem of the kwargs
+- put some parameters(input output prompts) to the front
+
 ## ComfyUI-to-Python-Extension
 
 The `ComfyUI-to-Python-Extension` is a powerful tool that translates [ComfyUI](https://github.com/comfyanonymous/ComfyUI) workflows into executable Python code. Designed to bridge the gap between ComfyUI's visual interface and Python's programming environment, this script facilitates the seamless transition from design to code execution. Whether you're a data scientist, a software developer, or an AI enthusiast, this tool streamlines the process of implementing ComfyUI workflows in Python.
