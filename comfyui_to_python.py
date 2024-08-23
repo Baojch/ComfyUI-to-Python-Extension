@@ -298,9 +298,9 @@ class CodeGenerator:
         return f'{key}={value}'
 
     def extract_prompts_and_file_paths(self, class_type: str, inputs: Dict) -> Dict:
-        class_type_clean = class_type.replace(" ", "_").replace("//","")
+        class_type_clean = class_type.replace(" ", "_").replace("//","").replace(" | ","_").replace("|","_").replace("< ","").replace("> ","").replace("<","").replace(">","")
         for key, value in inputs.items():
-            if 'prompt' in key.lower() or 'text' in key.lower():
+            if 'prompt' in key.lower() or 'Text_text' in key.lower():
                 variable_name = f"{class_type_clean}_{key}"
                 self.prompts[variable_name] = value
                 inputs[key] = {'variable_name': f'{variable_name}'}
